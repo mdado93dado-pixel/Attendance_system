@@ -31,25 +31,52 @@ class AttendanceLogger:
         
         # Track recent logs to prevent duplicates
         self.recent_logs: Dict[str, float] = {}
+        self.current_day = datetime.now().strftime('%Y-%m-%d')
+        self.logged_today = set()
+        self.headers = [
+            'Name',
+            'Date',
+            'Time',
+            'Timestamp',
+            'Similarity',
+            'Photo'
+        ]
         
         # Initialize CSV file
         self._initialize_csv()
+        self._load_logged_today()
     
     def _initialize_csv(self):
         """Initialize CSV file with headers if it doesn't exist"""
         if not self.attendance_file.exists():
             with open(self.attendance_file, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    'Name', 
-                    'Date', 
-                    'Time', 
-                    'Timestamp', 
-                    'Similarity',
-                    'Photo'
-                ])
+                writer.writerow(self.headers)
             print(f"✓ Created attendance log: {self.attendance_file}")
     
+    def _load_logged_today(self):
+        """Load names already logged today to avoid duplicates."""
+        today = self.current_day
+        if not self.attendance_file.exists():
+            return
+        try:
+            with open(self.attendance_file, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row['Date'] == today:
+                        self.logged_today.add(row['Name'])
+        except Exception as e:
+            print(f"⚠ Error loading today's attendance cache: {e}")
+
+    def _refresh_day(self):
+        """Reset daily caches if a new day has started."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        if today != self.current_day:
+            self.current_day = today
+            self.logged_today.clear()
+            self.recent_logs.clear()
+            self._load_logged_today()
+
     def can_log(self, name: str) -> bool:
         """
         Check if enough time has passed to log this person again
@@ -58,6 +85,9 @@ class AttendanceLogger:
         Returns:
             True if logging is allowed
         """
+        self._refresh_day()
+        if name in self.logged_today:
+            return False
         current_time = time.time()
         last_log_time = self.recent_logs.get(name, 0)
         
@@ -108,6 +138,7 @@ class AttendanceLogger:
             
             # Update recent logs
             self.recent_logs[name] = current_time
+            self.logged_today.add(name)
             
             print(f"✓ Logged attendance: {name} at {time_str} (similarity: {similarity:.4f})")
             return True
@@ -217,6 +248,39 @@ class AttendanceLogger:
         
         print(f"{'='*70}")
         print(f"Total: {len(records)} records, {len(set(r['Name'] for r in records))} people")
+
+    def clear_attendance(self):
+        """Clear entire attendance log"""
+        with open(self.attendance_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(self.headers)
+        self.logged_today.clear()
+        self.recent_logs.clear()
+        print("✓ Attendance log cleared")
+
+    def remove_person_records(self, name: str) -> bool:
+        """Remove all attendance records for a specific person"""
+        if not self.attendance_file.exists():
+            return False
+        removed = False
+        with open(self.attendance_file, 'r') as f:
+            reader = list(csv.DictReader(f))
+        with open(self.attendance_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(self.headers)
+            for row in reader:
+                if row['Name'] != name:
+                    writer.writerow([row['Name'], row['Date'], row['Time'],
+                                     row['Timestamp'], row['Similarity'], row['Photo']])
+                else:
+                    removed = True
+        if removed:
+            if name in self.logged_today:
+                self.logged_today.remove(name)
+            if name in self.recent_logs:
+                del self.recent_logs[name]
+            print(f"✓ Removed attendance records for {name}")
+        return removed
     
     def clear_recent_logs(self):
         """Clear recent logs cache (useful for testing)"""

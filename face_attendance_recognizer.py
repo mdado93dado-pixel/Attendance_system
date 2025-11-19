@@ -139,21 +139,25 @@ class FaceRecognizer:
             verified = result['verified']
             
             # Choose color based on verification
+            details = result.get('info') or {}
+            has_perm = details.get('has_permission')
             if verified:
-                color = (0, 255, 0)  # Green for recognized
                 label = f"{name} ({similarity:.2f})"
-                details = result.get('info') or {}
-                permission_str = "Yes" if details.get('has_permission') else "No"
+                if has_perm:
+                    color = (0, 200, 0)  # green
+                else:
+                    color = (0, 165, 255)  # orange
                 extra_lines = []
                 if details:
                     if details.get('rank'):
                         extra_lines.append(f"Rank: {details.get('rank')}")
                     if details.get('age') is not None:
                         extra_lines.append(f"Age: {details.get('age')}")
-                    extra_lines.append(f"Perm: {permission_str}")
+                    perm_str = "Yes" if has_perm else "No"
+                    extra_lines.append(f"Perm: {perm_str}")
                 extra_text = " | ".join(extra_lines)
             else:
-                color = (0, 0, 255)  # Red for unknown
+                color = (0, 165, 255)  # orange for unknown
                 label = f"Unknown ({similarity:.2f})"
                 extra_text = ""
             

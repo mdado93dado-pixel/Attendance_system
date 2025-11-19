@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import threading
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import cv2
 from PIL import Image, ImageTk
 
@@ -57,6 +57,8 @@ class AttendanceGUI:
         self.person_details_text = None
         self.dataset_status_var = tk.StringVar(value="Dataset: 0 people")
         self.person_info_text = None
+        self.person_select_var = tk.StringVar()
+        self._last_displayed_infos: Optional[List[str]] = None
         
         self.setup_ui()
         self.refresh_person_list()
@@ -81,8 +83,21 @@ class AttendanceGUI:
     
     def setup_control_panel(self, parent):
         """Setup control panel"""
-        control_frame = ttk.LabelFrame(parent, text="Controls", padding="10")
-        control_frame.grid(row=0, column=0, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
+        container = ttk.Frame(parent)
+        container.grid(row=0, column=0, rowspan=2, sticky=(tk.N, tk.S), padx=(0, 10))
+        canvas = tk.Canvas(container, highlightthickness=0, width=280)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(container, orient='vertical', command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        inner = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=inner, anchor='nw')
+        def _on_config(event):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+        inner.bind("<Configure>", _on_config)
+
+        control_frame = ttk.LabelFrame(inner, text="Controls", padding="10")
+        control_frame.pack(fill=tk.BOTH, expand=True)
         
         # Camera controls
         ttk.Label(control_frame, text="Camera Controls", font=('Arial', 10, 'bold')).pack(pady=5)
@@ -139,11 +154,26 @@ class AttendanceGUI:
         ttk.Label(control_frame, textvariable=self.dataset_status_var).pack(pady=2)
         ttk.Button(control_frame, text="Open Dataset Manager",
                    command=self.open_dataset_manager).pack(fill=tk.X, pady=5)
+        ttk.Label(control_frame, text="Select Person:").pack(pady=(10,0))
+        self.person_combo = ttk.Combobox(
+            control_frame,
+            textvariable=self.person_select_var,
+            state="readonly"
+        )
+        self.person_combo.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(control_frame, text="Log Selected Attendance",
+                   command=self.log_selected_attendance).pack(fill=tk.X, pady=2)
+        ttk.Button(control_frame, text="Remove Selected Attendance",
+                   command=self.remove_selected_attendance).pack(fill=tk.X, pady=2)
+        ttk.Button(control_frame, text="Clear Attendance Log",
+                   command=self.clear_attendance_log).pack(fill=tk.X, pady=2)
         # Attendance
         ttk.Separator(control_frame, orient='horizontal').pack(fill=tk.X, pady=10)
         ttk.Button(control_frame, text="Show Today's Attendance", 
                   command=self.show_attendance).pack(fill=tk.X, pady=5)
-        
+        ttk.Button(control_frame, text="View Full Attendance",
+                  command=self.show_all_attendance).pack(fill=tk.X, pady=5)
         ttk.Button(control_frame, text="Export Attendance", 
                   command=self.export_attendance).pack(fill=tk.X, pady=5)
     
@@ -153,8 +183,7 @@ class AttendanceGUI:
         display_frame.grid(row=0, column=1, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
         display_frame.rowconfigure(0, weight=3)
         display_frame.rowconfigure(1, weight=1)
-        display_frame.columnconfigure(0, weight=2)
-        display_frame.columnconfigure(1, weight=1)
+        display_frame.columnconfigure(0, weight=1)
         
         # Video display
         video_frame = ttk.LabelFrame(display_frame, text="Camera Feed", padding="5")
@@ -170,13 +199,7 @@ class AttendanceGUI:
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.log_text.pack(expand=True, fill=tk.BOTH)
         
-        # Live person info display
-        info_frame = ttk.LabelFrame(display_frame, text="Detected Person Details", padding="5")
-        info_frame.grid(row=1, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
-        self.person_info_text = tk.Text(info_frame, height=10, wrap=tk.WORD)
-        self.person_info_text.pack(expand=True, fill=tk.BOTH)
-        self.person_info_text.configure(state='disabled')
-        self.update_live_person_info(None)
+        self.person_info_text = None
     
     def log(self, message):
         """Add message to log"""
@@ -184,18 +207,9 @@ class AttendanceGUI:
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
     
-    def update_live_person_info(self, info: Optional[Dict]):
-        """Show the latest recognized person's info"""
-        if not self.person_info_text:
-            return
-        self.person_info_text.configure(state='normal')
-        self.person_info_text.delete("1.0", tk.END)
-        if info:
-            text = self._format_person_message(info)
-        else:
-            text = "No person detected.\nRecognized person details will appear here."
-        self.person_info_text.insert(tk.END, text)
-        self.person_info_text.configure(state='disabled')
+    def update_live_person_info(self, infos: Optional[List[Dict]]):
+        """Details pane removed."""
+        return
     
     def toggle_camera(self):
         """Start/stop camera"""
@@ -271,20 +285,24 @@ class AttendanceGUI:
                     )
                     if success:
                         log_messages.append(f"✓ {result['name']} - Attendance logged")
-            detected_info = next(
-                (result['info'] for result in results if result['verified'] and result.get('info')),
-                None
-            )
-            self.root.after(0, lambda info=detected_info, msgs=log_messages: self._apply_recognition_updates(info, msgs))
+            detected_infos = []
+            for result in results:
+                if result['verified']:
+                    info = result.get('info')
+                    if not info and result['name']:
+                        info = self.dataset_manager.get_person_info(result['name'])
+                    if info:
+                        detected_infos.append(info)
+            self.root.after(0, lambda infos=detected_infos, msgs=log_messages: self._apply_recognition_updates(infos, msgs))
             output_frame = self.face_recognizer.draw_results(frame, results)
             self.last_output_frame = output_frame
         finally:
             self.processing_frame = False
 
-    def _apply_recognition_updates(self, info, log_messages):
+    def _apply_recognition_updates(self, infos, log_messages):
         for msg in log_messages:
             self.log(msg)
-        self.update_live_person_info(info)
+        self.update_live_person_info(infos)
     
     def add_person(self):
         """Add new person to dataset"""
@@ -353,6 +371,44 @@ class AttendanceGUI:
         # Restart camera if it was running
         if was_running or not self.camera_running:
             self.root.after(100, self.start_camera)
+
+    def _selected_person_name(self) -> Optional[str]:
+        name = self.person_select_var.get().strip()
+        if not name:
+            messagebox.showwarning("Select Person", "Please select a person first.")
+            return None
+        return name
+
+    def log_selected_attendance(self):
+        name = self._selected_person_name()
+        if not name:
+            return
+        success = self.attendance_logger.log_attendance(name, similarity=1.0, face_image=None)
+        if success:
+            self.log(f"Manual attendance logged for {name}")
+            messagebox.showinfo("Success", f"Attendance logged for {name}")
+        else:
+            messagebox.showinfo("Info", f"{name} already logged today.")
+
+    def remove_selected_attendance(self):
+        name = self._selected_person_name()
+        if not name:
+            return
+        if not messagebox.askyesno("Confirm", f"Remove attendance records for {name}?"):
+            return
+        removed = self.attendance_logger.remove_person_records(name)
+        if removed:
+            self.log(f"Removed attendance records for {name}")
+            messagebox.showinfo("Removed", f"Attendance records removed for {name}")
+        else:
+            messagebox.showinfo("Info", f"No attendance records found for {name}")
+
+    def clear_attendance_log(self):
+        if not messagebox.askyesno("Confirm", "Clear all attendance records?"):
+            return
+        self.attendance_logger.clear_attendance()
+        self.log("Attendance log cleared")
+        messagebox.showinfo("Cleared", "Attendance log cleared.")
     
     def refresh_person_list(self):
         """Refresh dataset summary and list window"""
@@ -377,6 +433,11 @@ class AttendanceGUI:
         else:
             self.update_person_details(None)
         
+        if hasattr(self, 'person_combo'):
+            current = self.person_select_var.get()
+            self.person_combo['values'] = people
+            if current not in people:
+                self.person_select_var.set('')
         return people
     
     def open_dataset_manager(self):
@@ -511,15 +572,7 @@ class AttendanceGUI:
             f"Rank: {info.get('rank','')}\n"
             f"Age: {info.get('age','N/A')}\n"
             f"Has Permission: {permission_text}\n"
-            f"Images: {info.get('num_images','N/A')}\n"
-            f"Embeddings: {info.get('num_embeddings','N/A')}\n"
-            f"Directory: {info.get('directory','')}\n"
         )
-        metadata = info.get('metadata', {})
-        if metadata:
-            message += "\nMetadata:\n"
-            for key, value in metadata.items():
-                message += f"  • {key}: {value}\n"
         return message
     
     def view_person_info(self):
@@ -612,16 +665,62 @@ class AttendanceGUI:
         if not records:
             messagebox.showinfo("Attendance", "No attendance records for today")
             return
+        records_by_name = {}
+        for row in records:
+            records_by_name.setdefault(row['Name'], []).append(row)
         
-        message = f"Attendance - {datetime.now().strftime('%Y-%m-%d')}\n\n"
+        top = tk.Toplevel(self.root)
+        top.title("Today's Attendance")
+        top.geometry("520x360")
+        top.columnconfigure(0, weight=1)
+        top.columnconfigure(1, weight=2)
+        top.rowconfigure(0, weight=1)
+
+        list_frame = ttk.Frame(top)
+        list_frame.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        listbox = tk.Listbox(list_frame, exportselection=False)
+        listbox.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        scroll = ttk.Scrollbar(list_frame, orient='vertical', command=listbox.yview)
+        scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        listbox.config(yscrollcommand=scroll.set)
+
+        detail = scrolledtext.ScrolledText(top, wrap=tk.WORD)
+        detail.grid(row=0, column=1, sticky=(tk.N, tk.S, tk.E, tk.W), padx=(5, 0))
+        detail.configure(state='disabled')
         
-        for record in records:
-            message += f"{record['Name']:<15} {record['Time']:<10} ({record['Similarity']})\n"
+        names = sorted(records_by_name.keys())
+        for name in names:
+            listbox.insert(tk.END, name)
+
+        def show_details(event=None):
+            selection = listbox.curselection()
+            if not selection:
+                return
+            name = listbox.get(selection[0])
+            person_info = self.dataset_manager.get_person_info(name)
+            entries = records_by_name.get(name, [])
+            detail.configure(state='normal')
+            detail.delete("1.0", tk.END)
+            if person_info:
+                detail.insert(tk.END, self._format_person_message(person_info))
+                detail.insert(tk.END, "\n")
+            detail.insert(tk.END, f"Today's records for {name}:\n")
+            detail.insert(tk.END, "-"*60 + "\n")
+            for entry in entries:
+                detail.insert(
+                    tk.END,
+                    f"Time: {entry['Time']}  Similarity: {entry['Similarity']}\n"
+                )
+            detail.configure(state='disabled')
+
+        listbox.bind("<<ListboxSelect>>", show_details)
+        if names:
+            listbox.selection_set(0)
+            show_details()
         
-        message += f"\nTotal: {len(records)} records"
-        
-        self.log("Showing today's attendance")
-        messagebox.showinfo("Today's Attendance", message)
+        self.log("Showing today's attendance in detail window")
     
     def export_attendance(self):
         """Export attendance to file"""
@@ -633,6 +732,71 @@ class AttendanceGUI:
         
         self.log("Attendance file info displayed")
         messagebox.showinfo("Export Attendance", message)
+    
+    def show_all_attendance(self):
+        """Show all attendance records"""
+        records = self.attendance_logger.get_all_attendance()
+        if not records:
+            messagebox.showinfo("Attendance", "No attendance records available")
+            return
+
+        by_name = {}
+        for row in records:
+            by_name.setdefault(row['Name'], []).append(row)
+        
+        top = tk.Toplevel(self.root)
+        top.title("Full Attendance Log")
+        top.geometry("620x430")
+        
+        top.columnconfigure(0, weight=1)
+        top.columnconfigure(1, weight=2)
+        top.rowconfigure(0, weight=1)
+        
+        list_frame = ttk.Frame(top)
+        list_frame.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        name_list = tk.Listbox(list_frame, exportselection=False)
+        name_list.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        scroll = ttk.Scrollbar(list_frame, orient='vertical', command=name_list.yview)
+        scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        name_list.config(yscrollcommand=scroll.set)
+        
+        detail_text = scrolledtext.ScrolledText(top, wrap=tk.WORD)
+        detail_text.grid(row=0, column=1, sticky=(tk.N, tk.S, tk.E, tk.W), padx=(5, 0))
+        detail_text.configure(state='disabled')
+        
+        names = sorted(by_name.keys())
+        for name in names:
+            name_list.insert(tk.END, name)
+
+        def show_details(event=None):
+            selection = name_list.curselection()
+            if not selection:
+                return
+            name = name_list.get(selection[0])
+            records_list = by_name.get(name, [])
+            info = self.dataset_manager.get_person_info(name)
+            
+            detail_text.configure(state='normal')
+            detail_text.delete("1.0", tk.END)
+            
+            if info:
+                detail_text.insert(tk.END, self._format_person_message(info))
+                detail_text.insert(tk.END, "\n")
+            detail_text.insert(tk.END, f"Attendance records for {name}:\n")
+            detail_text.insert(tk.END, "-" * 60 + "\n")
+            for row in records_list:
+                detail_text.insert(
+                    tk.END,
+                    f"Date: {row['Date']}  Time: {row['Time']}  Similarity: {row['Similarity']}\n"
+                )
+            detail_text.configure(state='disabled')
+
+        name_list.bind("<<ListboxSelect>>", show_details)
+        if names:
+            name_list.selection_set(0)
+            show_details()
     
     def run(self):
         """Run the GUI"""
