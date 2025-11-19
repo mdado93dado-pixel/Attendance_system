@@ -11,11 +11,13 @@ from typing import Optional, Dict
 import cv2
 from PIL import Image, ImageTk
 
+from face_attendance_main import Config
+
 class AttendanceGUI:
     """GUI for Face Recognition Attendance System"""
     
     def __init__(self, face_recognizer, dataset_manager, attendance_logger,
-                 face_detector, face_embedder, siamese_model):
+                 face_detector, face_embedder):
         """
         Args:
             face_recognizer: FaceRecognizer instance
@@ -23,19 +25,20 @@ class AttendanceGUI:
             attendance_logger: AttendanceLogger instance
             face_detector: FaceDetector instance
             face_embedder: FaceEmbedder instance
-            siamese_model: SiameseNetwork instance
         """
         self.face_recognizer = face_recognizer
         self.dataset_manager = dataset_manager
         self.attendance_logger = attendance_logger
         self.face_detector = face_detector
         self.face_embedder = face_embedder
-        self.siamese_model = siamese_model
         
         # Camera state
         self.camera_running = False
         self.cap = None
-        self.frame_interval_ms = 125  # ~8 frames per second
+        self.frame_interval_ms = 150  # balance between smoothness and CPU load
+        self.last_output_frame = None
+        self.processing_frame = False
+        self.pending_frame = None
         
         # Create main window
         self.root = tk.Tk()
@@ -203,7 +206,9 @@ class AttendanceGUI:
     
     def start_camera(self):
         """Start camera feed"""
-        self.cap = cv2.VideoCapture(0)
+        if self.cap:
+            self.cap.release()
+        self.cap = cv2.VideoCapture(Config.CAMERA_ID)
         if not self.cap.isOpened():
             messagebox.showerror("Error", "Failed to open camera")
             return
@@ -211,6 +216,8 @@ class AttendanceGUI:
         self.camera_running = True
         self.camera_btn.config(text="Stop Camera")
         self.log("Camera started")
+        self.last_output_frame = None
+        self.processing_frame = False
         
         # Start update loop
         self.update_camera()
@@ -218,23 +225,43 @@ class AttendanceGUI:
     def stop_camera(self):
         """Stop camera feed"""
         self.camera_running = False
+        self.processing_frame = False
         if self.cap:
             self.cap.release()
+            self.cap = None
         self.camera_btn.config(text="Start Camera")
         self.video_label.config(image='')
+        self.video_label.image = None
         self.log("Camera stopped")
     
     def update_camera(self):
         """Update camera frame"""
-        if not self.camera_running:
+        if not self.camera_running or not self.cap:
             return
         
         ret, frame = self.cap.read()
         if ret:
-            # Recognize faces
-            results = self.face_recognizer.recognize_from_frame(frame)
+            self.pending_frame = frame.copy()
+            if not self.processing_frame:
+                thread = threading.Thread(target=self._process_frame, args=(self.pending_frame.copy(),), daemon=True)
+                self.processing_frame = True
+                thread.start()
             
-            # Log attendance
+            display_frame = self.last_output_frame if self.last_output_frame is not None else frame
+            frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            img = img.resize((640, 480), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image=img)
+            self.video_label.config(image=photo)
+            self.video_label.image = photo
+        
+        self.root.after(self.frame_interval_ms, self.update_camera)
+
+    def _process_frame(self, frame):
+        """Recognize faces in a background thread"""
+        try:
+            results = self.face_recognizer.recognize_from_frame(frame)
+            log_messages = []
             for result in results:
                 if result['verified']:
                     success = self.attendance_logger.log_attendance(
@@ -243,31 +270,21 @@ class AttendanceGUI:
                         result['face']
                     )
                     if success:
-                        self.log(f"✓ {result['name']} - Attendance logged")
-            
-            # Determine first recognized person for details panel
-            detected_info = None
-            for result in results:
-                if result['verified'] and result.get('info'):
-                    detected_info = result['info']
-                    break
-            
-            self.update_live_person_info(detected_info)
-            
-            # Draw results
-            frame = self.face_recognizer.draw_results(frame, results)
-            
-            # Convert to PhotoImage
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            img = img.resize((640, 480), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(image=img)
-            
-            self.video_label.config(image=photo)
-            self.video_label.image = photo
-        
-        # Schedule next update
-        self.root.after(self.frame_interval_ms, self.update_camera)
+                        log_messages.append(f"✓ {result['name']} - Attendance logged")
+            detected_info = next(
+                (result['info'] for result in results if result['verified'] and result.get('info')),
+                None
+            )
+            self.root.after(0, lambda info=detected_info, msgs=log_messages: self._apply_recognition_updates(info, msgs))
+            output_frame = self.face_recognizer.draw_results(frame, results)
+            self.last_output_frame = output_frame
+        finally:
+            self.processing_frame = False
+
+    def _apply_recognition_updates(self, info, log_messages):
+        for msg in log_messages:
+            self.log(msg)
+        self.update_live_person_info(info)
     
     def add_person(self):
         """Add new person to dataset"""
@@ -311,7 +328,10 @@ class AttendanceGUI:
         self.root.update_idletasks()
         success = self.dataset_manager.add_person(
             name, self.face_detector, self.face_embedder,
-            rank=rank, age=age, has_permission=has_permission
+            rank=rank, age=age, has_permission=has_permission,
+            camera_id=Config.CAMERA_ID,
+            num_images=Config.IMAGES_PER_PERSON,
+            delay=Config.CAPTURE_DELAY
         )
         
         if success:
@@ -331,7 +351,7 @@ class AttendanceGUI:
             messagebox.showerror("Error", f"Failed to add {name}")
         
         # Restart camera if it was running
-        if was_running:
+        if was_running or not self.camera_running:
             self.root.after(100, self.start_camera)
     
     def refresh_person_list(self):

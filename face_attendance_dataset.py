@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import json
 import shutil
 import pickle
+import threading
 
 try:
     import faiss  # type: ignore
@@ -35,6 +36,9 @@ class DatasetManager:
         self.dataset_dir.mkdir(parents=True, exist_ok=True)
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
         
+        # Synchronization for background operations
+        self._lock = threading.RLock()
+
         # Load FAISS index/labels before caching embeddings
         self.index = self._load_faiss_index()
         self.vector_labels = self._load_vector_labels()
@@ -82,6 +86,8 @@ class DatasetManager:
         captured = 0
         embeddings = []
         last_capture_time = 0
+        images_saved = 0
+        base_face_paths: List[Path] = []
         
         while captured < num_images:
             ret, frame = cap.read()
@@ -108,19 +114,31 @@ class DatasetManager:
                 current_time = time.time()
                 if current_time - last_capture_time > delay:
                     # Extract face
-                    face = face_detector.extract_face(frame, face_bbox)
+                    face = face_detector.extract_face(
+                        frame, face_bbox, target_size=face_embedder.input_size
+                    )
                     if face is not None:
-                        # Save image
                         img_path = person_dir / f"{name}_{captured+1:03d}.jpg"
                         cv2.imwrite(str(img_path), face)
+                        base_face_paths.append(img_path)
+                        images_saved += 1
                         
-                        # Get embedding
                         embedding = face_embedder.get_embedding(face)
                         if embedding is not None:
-                            embeddings.append(embedding)
-                            captured += 1
-                            last_capture_time = current_time
-                            print(f"  ✓ Captured {captured}/{num_images}")
+                            embeddings.append(self._flatten_embedding(embedding))
+                        captured += 1
+                        last_capture_time = current_time
+                        print(f"  ✓ Captured {captured}/{num_images}")
+            else:
+                cv2.putText(
+                    display_frame,
+                    "No face detected",
+                    (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 255),
+                    2,
+                )
             
             # Display progress
             progress_text = f"Captured: {captured}/{num_images}"
@@ -140,26 +158,79 @@ class DatasetManager:
             print(f"❌ Insufficient images captured ({captured}). Need at least 3.")
             return False
         
-        # Update embeddings cache
-        existing = self.embeddings_cache.get(name, [])
-        existing.extend(embeddings)
-        self.embeddings_cache[name] = existing
+        with self._lock:
+            existing = self.embeddings_cache.get(name, [])
+            existing.extend(embeddings)
+            self.embeddings_cache[name] = existing
+            self.metadata[name] = {
+                'rank': rank,
+                'age': age,
+                'has_permission': has_permission,
+                'num_images': images_saved,
+                'num_embeddings': len(existing),
+                'added_timestamp': time.time(),
+                'directory': str(person_dir)
+            }
         self.save_embeddings()
-        
-        # Update metadata
-        self.metadata[name] = {
-            'rank': rank,
-            'age': age,
-            'has_permission': has_permission,
-            'num_images': captured,
-            'num_embeddings': len(embeddings),
-            'added_timestamp': time.time(),
-            'directory': str(person_dir)
-        }
         self.save_metadata()
+        
+        if base_face_paths:
+            threading.Thread(
+                target=self._augment_and_embed,
+                args=(name, base_face_paths, face_embedder),
+                daemon=True
+            ).start()
         
         print(f"✓ Successfully added '{name}' with {captured} images")
         return True
+
+    def _augment_face_samples(self, face: np.ndarray) -> List[np.ndarray]:
+        """
+        Generate simple augmentations to improve dataset variety.
+        Includes original, horizontal flip, brightness shifts, and slight blur/noise.
+        """
+        samples = []
+        flipped = cv2.flip(face, 1)
+        if flipped is not None:
+            samples.append(flipped)
+        brighter = cv2.convertScaleAbs(face, alpha=1.15, beta=10)
+        darker = cv2.convertScaleAbs(face, alpha=0.9, beta=-10)
+        samples.extend([brighter, darker])
+        blurred = cv2.GaussianBlur(face, (3, 3), 0)
+        noise = np.clip(face.astype(np.int16) + np.random.normal(0, 6, face.shape), 0, 255).astype(np.uint8)
+        samples.extend([blurred, noise])
+        return samples
+
+    def _augment_and_embed(self, name: str, image_paths: List[Path], face_embedder) -> None:
+        augmented_embeddings = []
+        images_added = 0
+        for img_path in image_paths:
+            face = cv2.imread(str(img_path))
+            if face is None:
+                continue
+            for idx, aug_face in enumerate(self._augment_face_samples(face), start=1):
+                aug_path = img_path.with_name(f"{img_path.stem}_aug{idx}.jpg")
+                cv2.imwrite(str(aug_path), aug_face)
+                embedding = face_embedder.get_embedding(aug_face)
+                if embedding is not None:
+                    augmented_embeddings.append(self._flatten_embedding(embedding))
+                    images_added += 1
+        if augmented_embeddings:
+            with self._lock:
+                existing = self.embeddings_cache.get(name, [])
+                existing.extend(augmented_embeddings)
+                self.embeddings_cache[name] = existing
+                meta = self.metadata.get(name, {})
+                meta['num_images'] = meta.get('num_images', 0) + images_added
+                meta['num_embeddings'] = len(existing)
+                self.metadata[name] = meta
+            self.save_embeddings()
+            self.save_metadata()
+
+    @staticmethod
+    def _flatten_embedding(embedding: np.ndarray) -> np.ndarray:
+        arr = np.asarray(embedding, dtype='float32')
+        return arr.reshape(-1)
     
     def _create_index(self):
         """Create an empty FAISS index"""
@@ -238,23 +309,24 @@ class DatasetManager:
     
     def save_embeddings(self):
         """Save embeddings to FAISS index"""
-        vectors = []
-        labels = []
-        
-        for name, person_embeddings in self.embeddings_cache.items():
-            for embedding in person_embeddings:
-                if embedding is None:
-                    continue
-                vectors.append(np.asarray(embedding, dtype='float32'))
-                labels.append(name)
-        
-        self.index = self._create_index()
-        if vectors:
-            matrix = np.vstack(vectors).astype('float32')
-            self.index.add(matrix)
-        self.vector_labels = labels
-        self._save_faiss_index()
-        print(f"✓ Saved {len(labels)} embeddings across {len(self.embeddings_cache)} people to FAISS")
+        with self._lock:
+            vectors = []
+            labels = []
+            
+            for name, person_embeddings in self.embeddings_cache.items():
+                for embedding in person_embeddings:
+                    if embedding is None:
+                        continue
+                    vectors.append(np.asarray(embedding, dtype='float32'))
+                    labels.append(name)
+            
+            self.index = self._create_index()
+            if vectors:
+                matrix = np.vstack(vectors).astype('float32')
+                self.index.add(matrix)
+            self.vector_labels = labels
+            self._save_faiss_index()
+            print(f"✓ Saved {len(labels)} embeddings across {len(self.embeddings_cache)} people to FAISS")
     
     def load_metadata(self) -> Dict:
         """Load metadata from disk"""
@@ -268,11 +340,12 @@ class DatasetManager:
     
     def save_metadata(self):
         """Save metadata to disk"""
-        try:
-            with open(self.metadata_file, 'w') as f:
-                json.dump(self.metadata, f, indent=2)
-        except Exception as e:
-            print(f"❌ Error saving metadata: {e}")
+        with self._lock:
+            try:
+                with open(self.metadata_file, 'w') as f:
+                    json.dump(self.metadata, f, indent=2)
+            except Exception as e:
+                print(f"❌ Error saving metadata: {e}")
     
     def get_all_embeddings(self) -> Dict[str, List[np.ndarray]]:
         """Get all embeddings"""

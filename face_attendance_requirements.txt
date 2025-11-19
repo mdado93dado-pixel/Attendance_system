@@ -1,19 +1,17 @@
 # Core dependencies
 numpy>=1.21.0
 opencv-python>=4.5.0
-tensorflow>=2.10.0
 Pillow>=9.0.0
 faiss-cpu>=1.7.4
+insightface>=0.7.3
+onnxruntime>=1.17.0
+scipy>=1.10.0
 
 # Face detection options (choose at least one)
-# MTCNN - Most accurate
+# RetinaFace (via insightface) is the default and ships with the package above
+# MTCNN / MediaPipe remain available if you prefer them
 mtcnn>=0.1.1
-
-# MediaPipe - Fast and lightweight
 mediapipe>=0.9.0
-
-# Face embedding (optional - for better accuracy)
-keras-facenet>=0.3.2
 
 # GUI
 tk  # Usually included with Python

@@ -1,87 +1,91 @@
 """
 Face Recognition Module
-Main recognition logic combining detection, embedding, and verification
+ArcFace embedding + cosine similarity verification.
 """
 
 import cv2
 import numpy as np
 import time
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
+
 
 class FaceRecognizer:
     """
-    Complete face recognition system
-    Combines detection, embedding extraction, and Siamese verification
+    Complete face recognition system using ArcFace embeddings and cosine similarity.
     """
-    
-    def __init__(self, face_detector, face_embedder, siamese_model, 
-                 dataset_manager, threshold=0.6):
+
+    def __init__(self, face_detector, face_embedder, dataset_manager, threshold=0.65):
         """
         Args:
             face_detector: FaceDetector instance
             face_embedder: FaceEmbedder instance
-            siamese_model: SiameseNetwork instance
             dataset_manager: DatasetManager instance
-            threshold: Similarity threshold for verification
+            threshold: Cosine similarity threshold for verification
         """
         self.face_detector = face_detector
         self.face_embedder = face_embedder
-        self.siamese_model = siamese_model
         self.dataset_manager = dataset_manager
         self.threshold = threshold
-        
-        # Get known embeddings
-        self.known_embeddings = dataset_manager.get_all_embeddings()
-        
-        print(f"✓ Face Recognizer initialized")
+
+        self.known_embeddings = self._prepare_embedding_cache()
+
+        print("✓ Face Recognizer initialized")
         print(f"  Known people: {len(self.known_embeddings)}")
         print(f"  Threshold: {threshold}")
-    
-    def recognize_face(self, face_image: np.ndarray, 
-                       return_details=False) -> Tuple[Optional[str], float, Optional[Dict]]:
+
+    @staticmethod
+    def _normalize(vec: np.ndarray) -> np.ndarray:
+        vec = np.asarray(vec, dtype="float32")
+        norm = np.linalg.norm(vec)
+        if norm == 0:
+            return vec
+        return vec / norm
+
+    def _prepare_embedding_cache(self) -> Dict[str, List[np.ndarray]]:
+        """Normalize all stored embeddings for cosine similarity."""
+        cache: Dict[str, List[np.ndarray]] = {}
+        raw_embeddings = self.dataset_manager.get_all_embeddings()
+        for name, embeddings in raw_embeddings.items():
+            normalized = [self._normalize(emb) for emb in embeddings if emb is not None]
+            if normalized:
+                cache[name] = normalized
+        return cache
+
+    def recognize_face(
+        self, face_image: np.ndarray, return_details: bool = False
+    ) -> Tuple[Optional[str], float, Optional[Dict]]:
         """
-        Recognize a face in the image
-        Args:
-            face_image: Face image (H, W, 3)
-            return_details: Whether to return detailed matching info
-        Returns:
-            (name, similarity, details) or (None, 0.0, None) if not recognized
+        Recognize a face in the image.
         """
-        # Extract embedding
         embedding = self.face_embedder.get_embedding(face_image)
         if embedding is None:
             return None, 0.0, None
-        
-        # Compare with all known embeddings
+
+        embedding = self._normalize(embedding)
+
         best_match = None
-        best_similarity = 0.0
-        all_similarities = {}
-        
+        best_similarity = -1.0
+        all_similarities: Dict[str, float] = {}
+
         for name, known_embeddings in self.known_embeddings.items():
-            # Compare with all embeddings of this person
-            similarities = []
-            for known_embedding in known_embeddings:
-                sim = self.siamese_model.predict_similarity(embedding, known_embedding)
-                similarities.append(sim)
-            
-            # Use maximum similarity for this person
-            max_sim = max(similarities) if similarities else 0.0
+            sims = [float(np.dot(embedding, known_emb)) for known_emb in known_embeddings]
+            if not sims:
+                continue
+            max_sim = max(sims)
             all_similarities[name] = max_sim
-            
             if max_sim > best_similarity:
                 best_similarity = max_sim
                 best_match = name
-        
-        # Check threshold
+
         if best_similarity >= self.threshold:
-            details = {
-                'all_similarities': all_similarities,
-                'embedding': embedding
-            } if return_details else None
-            
+            details = (
+                {"all_similarities": all_similarities, "embedding": embedding}
+                if return_details
+                else None
+            )
             return best_match, best_similarity, details
-        
-        return None, best_similarity, None
+
+        return None, best_similarity if best_similarity > 0 else 0.0, None
     
     def recognize_from_frame(self, frame: np.ndarray) -> list:
         """
@@ -209,9 +213,7 @@ class FaceRecognizer:
                 for result in results:
                     if result['verified']:
                         attendance_logger.log_attendance(
-                            result['name'],
-                            result['similarity'],
-                            result['face']
+                            result["name"], result["similarity"], result["face"]
                         )
             
             # Draw results
@@ -260,7 +262,7 @@ class FaceRecognizer:
     
     def update_embeddings(self):
         """Reload embeddings from dataset manager"""
-        self.known_embeddings = self.dataset_manager.get_all_embeddings()
+        self.known_embeddings = self._prepare_embedding_cache()
         print(f"✓ Updated embeddings: {len(self.known_embeddings)} people")
     
     def set_threshold(self, threshold: float):

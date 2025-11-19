@@ -22,37 +22,20 @@ ATTENDANCE_DIR = DATA_DIR / "attendance"
 for directory in [DATA_DIR, DATASET_DIR, EMBEDDINGS_DIR, MODELS_DIR, LOGS_DIR, ATTENDANCE_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-
-def resolve_siamese_model_path():
-    """
-    Prefer an existing trained model from the shared 'model' folder, falling
-    back to the default h5 path inside the data directory.
-    """
-    facenet_path = MODELS_DIR / "siamese_facenet_model.h5"
-    keras_path = MODELS_DIR / "siamese_model.keras"
-    h5_path = MODELS_DIR / "siamese_model.h5"
-    for candidate in (facenet_path, keras_path, h5_path):
-        if candidate.exists():
-            return candidate
-    return h5_path
-
 # Configuration
 class Config:
     # Face detection
-    FACE_DETECTION_METHOD = "mtcnn"  # Options: mtcnn, opencv, mediapipe
+    FACE_DETECTION_METHOD = "mtcnn"  # Options: retinaface, mtcnn, opencv, mediapipe
     MIN_FACE_SIZE = 40
     DETECTION_CONFIDENCE = 0.9
     
     # Embedding model
-    EMBEDDING_MODEL = "facenet"  # facenet or mobilefacenet
-    EMBEDDING_DIM = 512 if EMBEDDING_MODEL == "facenet" else 128
-    
-    # Siamese network
-    SIAMESE_MODEL_PATH = resolve_siamese_model_path()
-    SIMILARITY_THRESHOLD = 0.6  # Adjust based on validation
+    EMBEDDING_MODEL = str(Path.home() / ".insightface/models/buffalo_l/w600k_r50.onnx")
+    EMBEDDING_DIM = 512
+    SIMILARITY_THRESHOLD = 0.65  # Adjust based on validation
     
     # Data collection
-    IMAGES_PER_PERSON = 10
+    IMAGES_PER_PERSON = 20
     CAPTURE_DELAY = 0.5  # seconds between captures
     
     # Attendance

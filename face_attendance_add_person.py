@@ -113,8 +113,7 @@ def main():
             print(f"  - {person_info['name']}: {person_info['num_embeddings']} embeddings")
         
         print("\nNext steps:")
-        print("  1. If this is your first person or you've added 2+ people,")
-        print("     train the Siamese network: python face_attendance_train.py")
+        print("  1. Add additional people as needed.")
         print("  2. Run the application: python face_attendance_run_gui.py or")
         print("     python face_attendance_run_camera.py")
     else:

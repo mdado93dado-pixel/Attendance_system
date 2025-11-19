@@ -1,20 +1,38 @@
 {
-  "ehab": {
-    "rank": "magor",
+  "mohamed ehab": {
+    "rank": "major",
     "age": 34,
     "has_permission": true,
-    "num_images": 10,
-    "num_embeddings": 10,
-    "added_timestamp": 1763464060.2033951,
-    "directory": "/Users/moamenahmed/Desktop/AI_projects/attendance_system/data/faces/ehab"
+    "num_images": 240,
+    "num_embeddings": 240,
+    "added_timestamp": 1763546474.843055,
+    "directory": "/Users/moamenahmed/Desktop/AI_projects/attendance_system/data/faces/mohamed ehab"
   },
-  "abd elnaby": {
-    "rank": "captain",
-    "age": 26,
+  "\u0645\u0635\u0637\u0641\u064a \u062d\u0644\u0645\u064a": {
+    "rank": "\u0645\u0644\u0627\u0632\u0645 \u0627\u0648\u0644",
+    "age": 25,
     "has_permission": true,
-    "num_images": 10,
-    "num_embeddings": 10,
-    "added_timestamp": 1763464089.984106,
-    "directory": "/Users/moamenahmed/Desktop/AI_projects/attendance_system/data/faces/abd elnaby"
+    "num_images": 240,
+    "num_embeddings": 240,
+    "added_timestamp": 1763546830.237846,
+    "directory": "/Users/moamenahmed/Desktop/AI_projects/attendance_system/data/faces/\u0645\u0635\u0637\u0641\u064a \u062d\u0644\u0645\u064a"
+  },
+  "momen": {
+    "rank": "ra2ed",
+    "age": 32,
+    "has_permission": true,
+    "num_images": 120,
+    "num_embeddings": 0,
+    "added_timestamp": 1763548566.762469,
+    "directory": "/Users/moamenahmed/Desktop/AI_projects/attendance_system/data/faces/momen"
+  },
+  "momen ahmed": {
+    "rank": "ra2ed",
+    "age": 32,
+    "has_permission": true,
+    "num_images": 120,
+    "num_embeddings": 120,
+    "added_timestamp": 1763549127.5444632,
+    "directory": "/Users/moamenahmed/Desktop/AI_projects/attendance_system/data/faces/momen ahmed"
   }
 }

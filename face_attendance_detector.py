@@ -1,6 +1,6 @@
 """
 Face Detection Module
-Supports MTCNN, OpenCV Haar Cascade, and MediaPipe
+Supports RetinaFace (InsightFace), MTCNN, OpenCV Haar Cascade, and MediaPipe
 """
 
 import cv2
@@ -15,12 +15,24 @@ class FaceDetector:
         self.min_face_size = min_face_size
         self.confidence = confidence
         self.detector = None
+        self.retina_app = None
         
         self._initialize_detector()
     
     def _initialize_detector(self):
         """Initialize the selected detector"""
-        if self.method == "mtcnn":
+        if self.method == "retinaface":
+            try:
+                from insightface.app import FaceAnalysis
+                self.retina_app = FaceAnalysis(name="buffalo_l")
+                ctx_id = 0 if cv2.cuda.getCudaEnabledDeviceCount() > 0 else -1
+                self.retina_app.prepare(ctx_id=ctx_id, det_thresh=self.confidence)
+                print("✓ RetinaFace detector initialized")
+            except Exception as exc:
+                print(f"⚠ RetinaFace not available ({exc}). Install: pip install insightface onnxruntime")
+                self._fallback_to_opencv()
+        
+        elif self.method == "mtcnn":
             try:
                 from mtcnn import MTCNN
                 # mtcnn==1.0.0 does not expose min_face_size, so we filter manually
@@ -69,13 +81,35 @@ class FaceDetector:
         Detect faces in frame
         Returns: List of (x, y, w, h) bounding boxes
         """
-        if self.method == "mtcnn":
+        if self.method == "retinaface":
+            return self._detect_retinaface(frame)
+        elif self.method == "mtcnn":
             return self._detect_mtcnn(frame)
         elif self.method == "mediapipe":
             return self._detect_mediapipe(frame)
         elif self.method == "opencv":
             return self._detect_opencv(frame)
         return []
+
+    def _detect_retinaface(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Detect faces using RetinaFace (InsightFace)"""
+        if self.retina_app is None:
+            return []
+        detections = self.retina_app.get(frame)
+        boxes: List[Tuple[int, int, int, int]] = []
+        h, w = frame.shape[:2]
+        for det in detections:
+            bbox = det.bbox.astype(int)
+            x1 = max(0, bbox[0])
+            y1 = max(0, bbox[1])
+            x2 = min(w, bbox[2])
+            y2 = min(h, bbox[3])
+            width = max(1, x2 - x1)
+            height = max(1, y2 - y1)
+            if width < self.min_face_size or height < self.min_face_size:
+                continue
+            boxes.append((x1, y1, width, height))
+        return boxes
     
     def _detect_mtcnn(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
         """Detect faces using MTCNN"""
