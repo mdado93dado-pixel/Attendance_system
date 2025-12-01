@@ -6,12 +6,18 @@ Simple interface for face recognition attendance system
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import threading
+import time
+import platform
 from datetime import datetime
 from typing import Optional, Dict, List
+from pathlib import Path
 import cv2
 from PIL import Image, ImageTk
 
 from face_attendance_main import Config
+
+# Optional custom alarm path (Windows WAV). Replace the string below if you want a different file.
+ALARM_SOUND_PATH = r"E:\mohamed\projects\attendance_system-main\alarm.wav"
 
 class AttendanceGUI:
     """GUI for Face Recognition Attendance System"""
@@ -60,6 +66,16 @@ class AttendanceGUI:
         self.person_info_text = None
         self.person_select_var = tk.StringVar()
         self._last_displayed_infos: Optional[List[str]] = None
+        self.last_alarm_time = 0.0
+        self.alarm_cooldown = 5.0  # seconds between alarm sounds
+        default_alarm = Path(__file__).parent / "alarm.wav"
+        custom_alarm = Path(ALARM_SOUND_PATH) if ALARM_SOUND_PATH else None
+        self.alarm_sound_path: Optional[str] = None
+        for candidate in (custom_alarm, default_alarm):
+            if candidate and candidate.exists():
+                self.alarm_sound_path = str(candidate)
+                break
+        self._alarm_lock = threading.Lock()
         
         self.setup_ui()
         self.refresh_person_list()
@@ -254,6 +270,34 @@ class AttendanceGUI:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
+
+    def _trigger_alarm(self):
+        """Play an alarm sound when an unauthorized person is seen."""
+        now = time.time()
+        with self._alarm_lock:
+            if now - self.last_alarm_time < self.alarm_cooldown:
+                return
+            self.last_alarm_time = now
+        threading.Thread(target=self._play_alarm_sound, daemon=True).start()
+
+    def _play_alarm_sound(self):
+        """
+        Non-blocking alarm sound with a safe fallback.
+        If a WAV file path is set (Windows), it will be played; otherwise, a simple beep is used.
+        """
+        try:
+            if platform.system() == "Windows":
+                import winsound
+                if self.alarm_sound_path:
+                    winsound.PlaySound(self.alarm_sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                else:
+                    pattern = [(900, 250), (1200, 350), (900, 250)]
+                    for freq, dur in pattern:
+                        winsound.Beep(freq, dur)
+            else:
+                print("\a", end="", flush=True)
+        except Exception as exc:
+            self.root.after(0, lambda: self.log(f"Alarm sound failed: {exc}"))
     
     def update_live_person_info(self, infos: Optional[List[Dict]]):
         """Details pane removed."""
@@ -324,6 +368,7 @@ class AttendanceGUI:
         try:
             results = self.face_recognizer.recognize_from_frame(frame)
             log_messages = []
+            unauthorized_detected = False
             for result in results:
                 if result['verified']:
                     success = self.attendance_logger.log_attendance(
@@ -341,15 +386,25 @@ class AttendanceGUI:
                         info = self.dataset_manager.get_person_info(result['name'])
                     if info:
                         detected_infos.append(info)
-            self.root.after(0, lambda infos=detected_infos, msgs=log_messages: self._apply_recognition_updates(infos, msgs))
+                        if info.get('has_permission') is False:
+                            unauthorized_detected = True
+            if unauthorized_detected:
+                self._trigger_alarm()
+            self.root.after(
+                0,
+                lambda infos=detected_infos, msgs=log_messages, alert=unauthorized_detected:
+                    self._apply_recognition_updates(infos, msgs, alert)
+            )
             output_frame = self.face_recognizer.draw_results(frame, results)
             self.last_output_frame = output_frame
         finally:
             self.processing_frame = False
 
-    def _apply_recognition_updates(self, infos, log_messages):
+    def _apply_recognition_updates(self, infos, log_messages, unauthorized=False):
         for msg in log_messages:
             self.log(msg)
+        if unauthorized:
+            self.log("ALERT: Person detected without permission")
         self.update_live_person_info(infos)
     
     def add_person(self):
