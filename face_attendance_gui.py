@@ -45,6 +45,14 @@ class AttendanceGUI:
         self.last_output_frame = None
         self.processing_frame = False
         self.pending_frame = None
+        # Simple single-person tracker state
+        self.tracker = None
+        self.tracked_name: Optional[str] = None
+        self.tracked_last_seen = 0.0
+        self.tracking_grace_seconds = 1.0  # how long we tolerate lost tracking
+        self.required_known_duration = 2.0  # seconds a person must stay verified before tracking
+        self._tracking_candidate_name: Optional[str] = None
+        self._tracking_candidate_since = 0.0
         
         # Create main window
         self.root = tk.Tk()
@@ -298,6 +306,72 @@ class AttendanceGUI:
                 print("\a", end="", flush=True)
         except Exception as exc:
             self.root.after(0, lambda: self.log(f"Alarm sound failed: {exc}"))
+
+    def _create_tracker(self):
+        """Try to create an OpenCV tracker (handles legacy namespace)."""
+        candidates = [
+            ("legacy", "TrackerCSRT_create"),
+            ("", "TrackerCSRT_create"),
+            ("legacy", "TrackerKCF_create"),
+            ("", "TrackerKCF_create"),
+        ]
+        for namespace, name in candidates:
+            parent = getattr(cv2, namespace, cv2) if namespace else cv2
+            creator = getattr(parent, name, None)
+            if creator:
+                try:
+                    return creator()
+                except Exception:
+                    continue
+        return None
+
+    def _start_tracking(self, frame, bbox, name):
+        """Initialize tracking for a verified person after the hold duration."""
+        tracker = self._create_tracker()
+        if not tracker:
+            self.log("Tracking unavailable: no supported OpenCV tracker found.")
+            return
+        ok = tracker.init(frame, tuple(map(float, bbox)))
+        if not ok:
+            self.log("Failed to initialize tracker.")
+            return
+        self.tracker = tracker
+        self.tracked_name = name
+        self.tracked_last_seen = time.time()
+        self._tracking_candidate_name = None
+        self._tracking_candidate_since = 0.0
+        self.log(f"Tracking locked on {name} (hold {self.required_known_duration:.1f}s reached)")
+
+    def _clear_tracking(self):
+        """Reset tracking state when the person leaves or tracking is lost."""
+        self.tracker = None
+        self.tracked_name = None
+        self.tracked_last_seen = 0.0
+        self._tracking_candidate_name = None
+        self._tracking_candidate_since = 0.0
+
+    def _result_has_permission(self, result: Dict) -> bool:
+        """Return True only for people with permission explicitly set to Yes."""
+        info = result.get('info')
+        if not info and result.get('name'):
+            info = self.dataset_manager.get_person_info(result['name'])
+        return bool(info and info.get('has_permission') is True)
+
+    @staticmethod
+    def _bbox_iou(box_a, box_b) -> float:
+        """Intersection over Union for (x, y, w, h) boxes."""
+        ax, ay, aw, ah = box_a
+        bx, by, bw, bh = box_b
+        a_x2, a_y2 = ax + aw, ay + ah
+        b_x2, b_y2 = bx + bw, by + bh
+        inter_x1, inter_y1 = max(ax, bx), max(ay, by)
+        inter_x2, inter_y2 = min(a_x2, b_x2), min(a_y2, b_y2)
+        inter_w, inter_h = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        area_a = aw * ah
+        area_b = bw * bh
+        union = area_a + area_b - inter_area
+        return inter_area / union if union > 0 else 0.0
     
     def update_live_person_info(self, infos: Optional[List[Dict]]):
         """Details pane removed."""
@@ -332,6 +406,7 @@ class AttendanceGUI:
         """Stop camera feed"""
         self.camera_running = False
         self.processing_frame = False
+        self._clear_tracking()
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -366,10 +441,61 @@ class AttendanceGUI:
     def _process_frame(self, frame):
         """Recognize faces in a background thread"""
         try:
+            now = time.time()
+            tracking_box = None
+
+            if self.tracker and self.tracked_name:
+                ok, bbox = self.tracker.update(frame)
+                if ok:
+                    self.tracked_last_seen = now
+                    tracking_box = bbox
+                elif now - self.tracked_last_seen > self.tracking_grace_seconds:
+                    self._clear_tracking()
+
             results = self.face_recognizer.recognize_from_frame(frame)
+            tracked_detection = None
+            if self.tracked_name:
+                tracked_detection = next((r for r in results if r.get('name') == self.tracked_name), None)
+
+            if not self.tracked_name:
+                candidate = next(
+                    (r for r in results if r['verified'] and self._result_has_permission(r)),
+                    None
+                )
+                if candidate:
+                    if self._tracking_candidate_name == candidate['name']:
+                        if now - self._tracking_candidate_since >= self.required_known_duration:
+                            self._start_tracking(frame, candidate['bbox'], candidate['name'])
+                            tracking_box = candidate['bbox']
+                    else:
+                        self._tracking_candidate_name = candidate['name']
+                        self._tracking_candidate_since = now
+                else:
+                    self._tracking_candidate_name = None
+                    self._tracking_candidate_since = 0.0
+            else:
+                # If we lost the tracker but still detect the person, re-anchor; if drifted, snap back.
+                if tracked_detection:
+                    det_box = tracked_detection['bbox']
+                    if tracking_box:
+                        iou = self._bbox_iou(tracking_box, det_box)
+                        if iou < 0.1:
+                            self._start_tracking(frame, det_box, self.tracked_name)
+                            tracking_box = det_box
+                    else:
+                        self._start_tracking(frame, det_box, self.tracked_name)
+                        tracking_box = det_box
+                elif now - self.tracked_last_seen > self.tracking_grace_seconds:
+                    self._clear_tracking()
+
+            filtered_results = [
+                r for r in results
+                if not (self.tracked_name and r.get('name') == self.tracked_name)
+            ]
+
             log_messages = []
             unauthorized_detected = False
-            for result in results:
+            for result in filtered_results:
                 if result['verified']:
                     success = self.attendance_logger.log_attendance(
                         result['name'],
@@ -379,7 +505,7 @@ class AttendanceGUI:
                     if success:
                         log_messages.append(f"✓ {result['name']} - Attendance logged")
             detected_infos = []
-            for result in results:
+            for result in filtered_results:
                 if result['verified']:
                     info = result.get('info')
                     if not info and result['name']:
@@ -395,7 +521,61 @@ class AttendanceGUI:
                 lambda infos=detected_infos, msgs=log_messages, alert=unauthorized_detected:
                     self._apply_recognition_updates(infos, msgs, alert)
             )
-            output_frame = self.face_recognizer.draw_results(frame, results)
+            output_frame = self.face_recognizer.draw_results(frame, filtered_results)
+            if tracking_box and self.tracked_name:
+                x, y, w, h = [int(v) for v in tracking_box]
+                info = self.dataset_manager.get_person_info(self.tracked_name) or {}
+                color = (0, 255, 0)  # green
+                label = f"{self.tracked_name}"
+                rank = info.get('rank') or "N/A"
+                position = info.get('position') or "N/A"
+                perm_str = "Yes" if info.get('has_permission') else "No"
+                extra_text_lines = [
+                    f"{label} | Rank: {rank}",
+                    f"Position: {position}",
+                    f"Perm: {perm_str}",
+                ]
+                cv2.rectangle(output_frame, (x, y), (x + w, y + h), color, 2)
+                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                top_y = max(0, y - 25)
+                cv2.rectangle(output_frame, (x, top_y), (x + label_size[0], y), color, -1)
+                cv2.putText(
+                    output_frame,
+                    label,
+                    (x, y - 8 if y - 8 > 0 else y + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 0),
+                    2
+                )
+                if extra_text_lines:
+                    text_y = y + h + 25
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.5
+                    thickness = 1
+                    sizes = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line in extra_text_lines]
+                    max_width = max(w for w, _ in sizes)
+                    line_height = max(hh for _, hh in sizes) + 4
+                    box_height = line_height * len(extra_text_lines) + 6
+                    cv2.rectangle(
+                        output_frame,
+                        (x, text_y - box_height),
+                        (x + max_width + 10, text_y),
+                        color,
+                        -1
+                    )
+                    current_y = text_y - box_height + line_height
+                    for line in extra_text_lines:
+                        cv2.putText(
+                            output_frame,
+                            line,
+                            (x + 5, current_y - 2),
+                            font,
+                            font_scale,
+                            (0, 0, 0),
+                            thickness
+                        )
+                        current_y += line_height
             self.last_output_frame = output_frame
         finally:
             self.processing_frame = False
